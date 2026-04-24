@@ -25,7 +25,7 @@ def toggle_estadistica():
     st.session_state.estadistica = "Promedio" if st.session_state.estadistica == "Mediana" else "Mediana"
 
 # ============================================================================
-# CSS PARA AMBOS TEMAS (igual que tu original)
+# CSS PARA AMBOS TEMAS (igual que el original)
 # ============================================================================
 if st.session_state.tema == "light":
     tema_css = """
@@ -82,45 +82,63 @@ st.title("📊 Market Intelligence - Purolomo & Marcas Aliadas")
 st.caption("Comparativa de precios con reglas personalizadas")
 
 # ============================================================================
-# CARGA DE DATOS DESDE CSVs (reemplaza PostgreSQL)
+# BARRA SUPERIOR DE HERRAMIENTAS
+# ============================================================================
+col_t1, col_t2, col_t3 = st.columns([1, 1, 3])
+with col_t1:
+    tema_icono = "☀️" if st.session_state.tema == "light" else "🌙"
+    st.button(f"{tema_icono} Tema", on_click=toggle_tema, help="Cambiar tema claro/oscuro")
+with col_t2:
+    estadistica_icono = "📊" if st.session_state.estadistica == "Mediana" else "📈"
+    st.button(f"{estadistica_icono} {st.session_state.estadistica}", on_click=toggle_estadistica, help="Alternar entre mediana y promedio")
+with col_t3:
+    usar_usd = st.toggle("💰 USD", value=True)
+    moneda = "USD" if usar_usd else "Bs"
+
+# ============================================================================
+# CARGA DE DATOS DESDE CSVs (sin base de datos)
 # ============================================================================
 @st.cache_data
 def cargar_datos():
-    # Cargar Gamma
+    # Cargar precios de Excelsior Gama
     df_gamma = pd.read_csv("Historico_Gamma.csv", parse_dates=["fecha"])
     df_gamma["supermercado"] = "Excelsior Gama"
+    
+    # Cargar Plan Suarez si existe
     if os.path.exists("Historico_PlanSuarez.csv"):
         df_plan = pd.read_csv("Historico_PlanSuarez.csv", parse_dates=["fecha"])
         df_plan["supermercado"] = "Plan Suarez"
-        df = pd.concat([df_gamma, df_plan], ignore_index=True)
+        df_precios = pd.concat([df_gamma, df_plan], ignore_index=True)
     else:
-        df = df_gamma
-    # Renombrar columnas
-    df.rename(columns={
+        df_precios = df_gamma
+    
+    # Renombrar columnas para que coincidan con el resto del código
+    df_precios.rename(columns={
         "nombre": "nombre_original",
         "precio_usd": "precio_usd",
         "precio_bs": "precio_bs",
-        "fecha": "fecha_extraccion",
-        "categoria_principal": "categoria"
+        "fecha": "fecha_extraccion"
     }, inplace=True)
-    # Agregar columna es_propio: cualquier producto que contenga "LA LUCHA" en el nombre
-    df["es_propio"] = df["nombre_original"].str.contains("LA LUCHA", case=False, na=False)
-    # Asignar un ID de producto_referencia simulado (para compatibilidad con el resto del código)
-    # Para el propio, usaremos 1; para la competencia, un ID único por nombre.
-    df["producto_referencia_id"] = 0
-    propios = df[df["es_propio"]]["nombre_original"].unique()
-    for idx, nombre in enumerate(propios, start=1):
-        df.loc[df["nombre_original"] == nombre, "producto_referencia_id"] = idx
-    # Para competidores, asignamos IDs negativos distintos
-    competidores = df[~df["es_propio"]]["nombre_original"].unique()
-    for idx, nombre in enumerate(competidores, start=1000):
-        df.loc[df["nombre_original"] == nombre, "producto_referencia_id"] = idx
-    return df
+    
+    # Cargar productos de referencia
+    df_ref = pd.read_csv("productos_referencia.csv")
+    df_ref['es_propio'] = df_ref['es_propio'].astype(bool)
+    df_ref['activo'] = df_ref['activo'].astype(bool)
+    
+    # Cargar reglas de match
+    df_reglas = pd.read_csv("reglas_match.csv")
+    if not df_reglas.empty:
+        df_reglas['palabras_incluir'] = df_reglas['palabras_incluir'].apply(lambda x: x.split('|') if isinstance(x, str) and x else [])
+        df_reglas['palabras_excluir'] = df_reglas['palabras_excluir'].apply(lambda x: x.split('|') if isinstance(x, str) and x else [])
+    else:
+        df_reglas = pd.DataFrame(columns=['producto_propio_id', 'palabras_incluir', 'palabras_excluir'])
+    
+    return df_precios, df_ref, df_reglas
 
-df = cargar_datos()
+df_precios, df_ref, df_reglas = cargar_datos()
 
 # ============================================================================
-# FUNCIONES AUXILIARES (las mismas que tenías, sin cambios)
+# FUNCIONES AUXILIARES (todas las que usabas)
 # ============================================================================
 def extraer_peso(nombre):
     if not nombre:
@@ -170,8 +188,8 @@ def cumple_reglas(nombre_producto, palabras_incluir, palabras_excluir):
             return False
     return True
 
-def calcular_cobertura(precios_comp_ult, productos_unicos, super_ids_unicos):
-    total_combinaciones_posibles = len(productos_unicos) * len(super_ids_unicos)
+def calcular_cobertura(precios_comp_ult, productos_unicos, super_unicos):
+    total_combinaciones_posibles = len(productos_unicos) * len(super_unicos)
     total_datos_existentes = len(precios_comp_ult)
     cobertura = (total_datos_existentes / total_combinaciones_posibles) * 100 if total_combinaciones_posibles > 0 else 0
     return cobertura, total_datos_existentes, total_combinaciones_posibles
@@ -183,125 +201,96 @@ def formatear_nombre_producto(nombre):
     return " ".join(palabras).capitalize()
 
 # ============================================================================
-# TABLA AUXILIAR DE REGLAS (simulada con diccionario, ya que no tenemos BD)
+# FILTROS DE FECHA Y SUPERMERCADOS
 # ============================================================================
-# Para simplificar, almacenaremos las reglas en session_state
-if "reglas_match" not in st.session_state:
-    st.session_state.reglas_match = {}
-
-def guardar_reglas(producto_id, incluir, excluir):
-    st.session_state.reglas_match[producto_id] = {"incluir": incluir, "excluir": excluir}
-
-def obtener_reglas(producto_id):
-    return st.session_state.reglas_match.get(producto_id, {"incluir": [], "excluir": []})
-
-# ============================================================================
-# FILTROS DE FECHA Y SUPERMERCADOS (usando el DataFrame)
-# ============================================================================
-# Obtener lista de supermercados y fechas desde df
-super_list = sorted(df["supermercado"].unique())
-min_fecha = df["fecha_extraccion"].min().date()
-max_fecha = df["fecha_extraccion"].max().date()
-
 st.markdown("### Filtros")
 col_f1, col_f2, col_f3 = st.columns([1, 1, 2])
 with col_f1:
+    min_fecha = df_precios["fecha_extraccion"].min().date()
+    max_fecha = df_precios["fecha_extraccion"].max().date()
     fecha_inicio = st.date_input("Desde", min_fecha, min_value=min_fecha, max_value=max_fecha)
 with col_f2:
     fecha_fin = st.date_input("Hasta", max_fecha, min_value=min_fecha, max_value=max_fecha)
 with col_f3:
     st.write("")
 
+super_unicos = df_precios["supermercado"].unique()
 st.markdown("**Supermercados con datos:**")
-selected_super_nombres = []
-cols = st.columns(len(super_list))
-for idx, nombre in enumerate(super_list):
-    with cols[idx]:
-        if st.checkbox(nombre, value=True, key=f"sup_{nombre}"):
-            selected_super_nombres.append(nombre)
-if not selected_super_nombres:
-    selected_super_nombres = super_list
+selected_super_nombres = st.multiselect("", super_unicos, default=super_unicos.tolist())
+selected_super_nombres = selected_super_nombres if selected_super_nombres else super_unicos.tolist()
 
-# Filtrar datos
-mask = (df["fecha_extraccion"].dt.date >= fecha_inicio) & (df["fecha_extraccion"].dt.date <= fecha_fin) & (df["supermercado"].isin(selected_super_nombres))
-df_filtrado = df[mask]
+# Filtrar precios por fecha y supermercado
+mask = (df_precios["fecha_extraccion"].dt.date >= fecha_inicio) & (df_precios["fecha_extraccion"].dt.date <= fecha_fin) & (df_precios["supermercado"].isin(selected_super_nombres))
+df_precios_filtrado = df_precios[mask]
 
-# Métrica de productos propios
 st.markdown("---")
 st.markdown("### 📦 Productos Purolomo & Aliados por supermercado")
-cols_metric = st.columns(len(selected_super_nombres))
-for idx, sup_nombre in enumerate(selected_super_nombres):
-    count = df_filtrado[(df_filtrado["supermercado"] == sup_nombre) & df_filtrado["es_propio"]]["nombre_original"].nunique()
-    with cols_metric[idx]:
-        st.markdown(f"""
-        <div class="super-metric">
-            <strong>{sup_nombre}</strong><br>
-            <span style="font-size: 1.8rem; color:#CC0000;">{count}</span><br>
-            <span style="font-size: 0.7rem;">productos aliados</span>
-        </div>
-        """, unsafe_allow_html=True)
-st.markdown("---")
+if selected_super_nombres:
+    cols_metric = st.columns(len(selected_super_nombres))
+    for idx, sup in enumerate(selected_super_nombres):
+        count = df_precios_filtrado[(df_precios_filtrado["supermercado"] == sup) & (df_precios_filtrado["nombre_original"].str.contains("LA LUCHA", case=False, na=False))].shape[0]
+        with cols_metric[idx]:
+            st.markdown(f"""
+            <div class="super-metric">
+                <strong>{sup}</strong><br>
+                <span style="font-size: 1.8rem; color:#CC0000;">{count}</span><br>
+                <span style="font-size: 0.7rem;">productos aliados</span>
+            </div>
+            """, unsafe_allow_html=True)
+    st.markdown("---")
 
 # ============================================================================
-# SELECTOR DE PRODUCTO PROPIO (usando es_propio)
+# SELECTOR DE PRODUCTO PROPIO
 # ============================================================================
-productos_propios = df_filtrado[df_filtrado["es_propio"]]["nombre_original"].unique()
-if len(productos_propios) == 0:
-    st.error("No hay productos propios en los datos filtrados.")
+productos_propios = df_ref[(df_ref["es_propio"] == True) & (df_ref["activo"] == True)]
+if productos_propios.empty:
+    st.error("No hay productos propios clasificados. Ejecuta primero 'clasificador.py'.")
     st.stop()
-opciones = {formatear_nombre_producto(prod): prod for prod in productos_propios}
-producto_label_display = st.selectbox("🔍 Selecciona un producto propio:", list(opciones.keys()))
-producto_original = opciones[producto_label_display]
 
-# Obtener el ID de producto_referencia para este producto (el que asignamos al cargar)
-producto_id = df_filtrado[df_filtrado["nombre_original"] == producto_original]["producto_referencia_id"].iloc[0]
-
-# ============================================================================
-# REGLAS DE MATCH (desde session_state)
-# ============================================================================
-reglas = obtener_reglas(producto_id)
-palabras_incluir = reglas["incluir"]
-palabras_excluir = reglas["excluir"]
+opciones = {f"{row['marca']} - {row['nombre_producto']} ({row['presentacion']})" if pd.notna(row['presentacion']) else f"{row['marca']} - {row['nombre_producto']}": row['id'] for _, row in productos_propios.iterrows()}
+producto_label = st.selectbox("🔍 Selecciona un producto propio:", list(opciones.keys()))
+producto_id = opciones[producto_label]
+producto_actual = productos_propios[productos_propios["id"] == producto_id].iloc[0]
 
 # ============================================================================
-# PRECIOS DEL PRODUCTO PROPIO
+# PRECIOS DEL PRODUCTO PROPIO (asociar por texto, como hacías)
 # ============================================================================
-precios_propio = df_filtrado[df_filtrado["nombre_original"] == producto_original]
-
+nombre_propio_buscar = producto_actual["nombre_producto"]
+precios_propio = df_precios_filtrado[df_precios_filtrado["nombre_original"].str.contains(nombre_propio_buscar, case=False, na=False)]
 if precios_propio.empty:
-    st.warning(f"⚠️ El producto '{producto_label_display}' no tiene precios en los supermercados seleccionados.")
+    st.warning(f"⚠️ El producto '{producto_label}' no tiene precios en los supermercados seleccionados.")
     st.stop()
 
 # ============================================================================
-# COMPETIDORES: usando reglas o categoría (igual que tu código original)
+# COMPETIDORES: usar reglas_match si existen, o categoría
 # ============================================================================
-todos_precios = df_filtrado[df_filtrado["nombre_original"] != producto_original]
-competidores = []
-if palabras_incluir or palabras_excluir:
-    for _, row in todos_precios.iterrows():
+reglas_row = df_reglas[df_reglas["producto_propio_id"] == producto_id]
+if not reglas_row.empty:
+    palabras_incluir = reglas_row.iloc[0]["palabras_incluir"]
+    palabras_excluir = reglas_row.iloc[0]["palabras_excluir"]
+    competidores = []
+    for _, row in df_precios_filtrado.iterrows():
+        if row["nombre_original"] in precios_propio["nombre_original"].values:
+            continue
         if cumple_reglas(row["nombre_original"], palabras_incluir, palabras_excluir):
             competidores.append(row)
+    competidores = pd.DataFrame(competidores)
     st.info(f"📏 Usando reglas personalizadas: +{', '.join(palabras_incluir)}  -{', '.join(palabras_excluir)}")
 else:
-    categoria_propia = normalizar_categoria(producto_original)
-    for _, row in todos_precios.iterrows():
+    categoria_propia = normalizar_categoria(producto_actual["nombre_producto"])
+    competidores = []
+    for _, row in df_precios_filtrado.iterrows():
+        if row["nombre_original"] in precios_propio["nombre_original"].values:
+            continue
         if normalizar_categoria(row["nombre_original"]) == categoria_propia:
             competidores.append(row)
+    competidores = pd.DataFrame(competidores)
     st.info(f"📏 Sin reglas, usando categoría: '{categoria_propia}'")
 
-# Convertir lista de dicts a DataFrame
-if competidores:
-    competidores = pd.DataFrame(competidores)
-else:
-    competidores = pd.DataFrame()
-
 # ============================================================================
-# TABLA COMPARATIVA (últimos precios)
+# TABLA COMPARATIVA (últimos precios por producto y supermercado)
 # ============================================================================
-# Combinar propio y competidores
-todos_items = pd.concat([precios_propio, competidores]) if not competidores.empty else precios_propio
-
-# Obtener último precio por (supermercado, nombre_original)
+todos_items = pd.concat([precios_propio, competidores], ignore_index=True)
 ultimos = {}
 for _, row in todos_items.iterrows():
     key = (row["supermercado"], row["nombre_original"])
@@ -311,15 +300,15 @@ for _, row in todos_items.iterrows():
             "precio": float(precio_val),
             "fecha": row["fecha_extraccion"],
             "nombre_original": row["nombre_original"],
-            "peso": extraer_peso(row["nombre_original"])
+            "peso": extraer_peso(row["nombre_original"]),
+            "supermercado": row["supermercado"]
         }
 
 productos_unicos = sorted(set(v["nombre_original"] for v in ultimos.values()))
 super_unicos = sorted(set(k[0] for k in ultimos.keys()))
-super_nombres = super_unicos
 
-# Crear DataFrame con nombres formateados
-df_valores = pd.DataFrame(index=[formatear_nombre_producto(prod) for prod in productos_unicos], columns=super_nombres)
+# Construir DataFrame de valores
+df_valores = pd.DataFrame(index=[formatear_nombre_producto(prod) for prod in productos_unicos], columns=super_unicos)
 for prod in productos_unicos:
     prod_formateado = formatear_nombre_producto(prod)
     for sup in super_unicos:
@@ -329,10 +318,16 @@ for prod in productos_unicos:
         else:
             df_valores.loc[prod_formateado, sup] = None
 
-# Identificar fila del producto propio
-nombre_propio_tabla = formatear_nombre_producto(producto_original)
+# Identificar producto propio en la tabla (por nombre original)
+nombre_propio_tabla = None
+for prod in productos_unicos:
+    if producto_actual["nombre_producto"].lower() in prod.lower() or producto_actual["marca"].lower() in prod.lower():
+        nombre_propio_tabla = formatear_nombre_producto(prod)
+        break
+if not nombre_propio_tabla and not precios_propio.empty:
+    nombre_propio_tabla = formatear_nombre_producto(precios_propio.iloc[0]["nombre_original"])
 
-# Estilos: centrado y resaltado
+# Función para formatear celdas
 def format_precio(val):
     if pd.isna(val):
         return "Sin datos"
@@ -351,11 +346,11 @@ def resaltar_fila(row):
     return [''] * len(row)
 styled = styled.apply(resaltar_fila, axis=1)
 
-st.subheader(f"🛒 Comparativa: {producto_label_display}")
-st.dataframe(styled, use_container_width=True, height=400)
+fecha_max = todos_items["fecha_extraccion"].max().date()
+fecha_max_str = fecha_max.strftime("%d/%m/%Y")
 
-# Fecha máxima en los datos mostrados
-fecha_max_str = df_filtrado["fecha_extraccion"].max().strftime("%d/%m/%Y")
+st.subheader(f"🛒 Comparativa: {producto_actual['marca']} - {producto_actual['nombre_producto']}")
+st.dataframe(styled, use_container_width=True, height=400)
 st.markdown(f"<p class='centered-title'>📅 Datos actualizados al {fecha_max_str}</p>", unsafe_allow_html=True)
 
 # ============================================================================
@@ -363,8 +358,8 @@ st.markdown(f"<p class='centered-title'>📅 Datos actualizados al {fecha_max_st
 # ============================================================================
 st.subheader("📈 Indicadores Clave")
 
-precios_propio_ult = [v["precio"] for k, v in ultimos.items() if k[1] == producto_original]
-precios_comp_ult = [v["precio"] for k, v in ultimos.items() if k[1] != producto_original]
+precios_propio_ult = [v["precio"] for k, v in ultimos.items() if v["nombre_original"] == nombre_propio_tabla]
+precios_comp_ult = [v["precio"] for k, v in ultimos.items() if v["nombre_original"] != nombre_propio_tabla]
 
 if st.session_state.estadistica == "Mediana":
     valor_prop = np.median(precios_propio_ult) if precios_propio_ult else 0
@@ -375,7 +370,7 @@ else:
     valor_comp = np.mean(precios_comp_ult) if precios_comp_ult else 0
     titulo_est = "Promedio"
 
-cobertura = (len(precios_comp_ult) / (len(productos_unicos) * len(super_unicos))) * 100 if super_unicos else 0
+cobertura, datos_existentes, combinaciones_totales = calcular_cobertura(precios_comp_ult, productos_unicos, super_unicos)
 
 if valor_prop > valor_comp:
     clase_metric = "metric-red"
@@ -394,7 +389,7 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.markdown(f"""
     <div class="{clase_metric}">
-        <strong>💰 {producto_label_display.split(' - ')[0]} ({titulo_est})</strong><br>
+        <strong>💰 {producto_actual['marca']} ({titulo_est})</strong><br>
         <span style="font-size: 1.8rem;">{valor_prop:.2f} {moneda}</span>
     </div>
     """, unsafe_allow_html=True)
@@ -417,13 +412,14 @@ with col3:
     </div>
     """, unsafe_allow_html=True)
 
-st.caption(f"🔍 Análisis basado en {len(precios_comp_ult)} datos de precio (de un total de {len(productos_unicos) * len(super_unicos)} posibles). Cobertura: {cobertura:.1f}%. Estadística: {titulo_est}.")
+st.caption(f"🔍 Análisis basado en {datos_existentes} datos de precio (de un total de {combinaciones_totales} posibles). Cobertura: {cobertura:.1f}%. Estadística: {titulo_est}.")
 
 # ============================================================================
-# GRÁFICO EVOLUTIVO (igual que tu original)
+# GRÁFICO EVOLUTIVO (competencia vs propio)
 # ============================================================================
 st.subheader(f"📈 Evolución de precios - {titulo_est} de la competencia vs producto propio")
 
+# Agrupar competidores por fecha
 precios_comp_por_fecha = defaultdict(list)
 for _, row in competidores.iterrows():
     fecha = row["fecha_extraccion"].date()
@@ -444,15 +440,16 @@ for fecha, valores in precios_comp_por_fecha.items():
 for fecha, valores in precios_prop_por_fecha.items():
     if valores:
         stat = np.median(valores) if st.session_state.estadistica == "Mediana" else np.mean(valores)
-        datos_evol.append({"Fecha": fecha, "Tipo": producto_label_display.split(' - ')[0], "Precio": stat})
+        datos_evol.append({"Fecha": fecha, "Tipo": producto_actual["marca"], "Precio": stat})
 
 df_evol = pd.DataFrame(datos_evol).sort_values("Fecha")
+df_evol = df_evol.drop_duplicates(subset=["Fecha", "Tipo"])
+
 if not df_evol.empty:
-    colores_map = {producto_label_display.split(' - ')[0]: "#CC0000", "Competencia": "#00A859"}
+    colores = {producto_actual["marca"]: "#CC0000", "Competencia": "#00A859"}
     fig_evol = px.line(df_evol, x="Fecha", y="Precio", color="Tipo", markers=True,
                        labels={"Precio": f"Precio ({moneda})", "Fecha": "Fecha"},
-                       color_discrete_map=colores_map,
-                       title=f"Evolución - {titulo_est} diaria")
+                       color_discrete_map=colores, text="Precio")
     fig_evol.update_traces(textposition="top center", texttemplate='%{y:.2f}', marker=dict(size=8))
     fig_evol.update_layout(
         plot_bgcolor="white",
@@ -460,13 +457,13 @@ if not df_evol.empty:
         legend_title=None, height=450, hovermode="x unified",
         font=dict(color="black" if st.session_state.tema == "light" else "white")
     )
-    fig_evol.update_xaxes(tickformat="%Y-%m-%d", tickangle=45)
+    fig_evol.update_xaxes(tickformat="%Y-%m-%d", tickangle=45, dtick="D1")
     st.plotly_chart(fig_evol, use_container_width=True)
 else:
     st.info("No hay datos suficientes para el gráfico evolutivo.")
 
 # ============================================================================
-# BOXPLOT POR DÍA
+# BOXPLOT POR DÍA (competencia)
 # ============================================================================
 st.subheader("📊 Distribución de precios de la competencia por día (Boxplot)")
 if not competidores.empty:
@@ -477,6 +474,7 @@ if not competidores.empty:
         sup = row["supermercado"]
         box_data.append({"Fecha": fecha, "Precio": precio, "Supermercado": sup, "Producto": row["nombre_original"]})
     df_box = pd.DataFrame(box_data)
+    
     fig_box = px.box(df_box, x="Fecha", y="Precio", points="all",
                      labels={"Precio": f"Precio ({moneda})", "Fecha": "Fecha"},
                      title="Distribución diaria de precios de competidores",
@@ -500,7 +498,7 @@ else:
     st.info("No hay competidores para mostrar boxplot.")
 
 # ============================================================================
-# EDITOR DE REGLAS (manual, sin BD)
+# EDITOR DE REGLAS (opcional, mantiene funcionalidad)
 # ============================================================================
 with st.expander("✏️ Editar reglas de inclusión/exclusión para este producto"):
     st.markdown("""
@@ -508,27 +506,14 @@ with st.expander("✏️ Editar reglas de inclusión/exclusión para este produc
     - **Incluir** (separado por comas): palabras que **deben** aparecer en el nombre del competidor.  
     - **Excluir** (separado por comas): palabras que **no** deben aparecer.  
     """)
-    incluir_actual = ", ".join(palabras_incluir)
-    excluir_actual = ", ".join(palabras_excluir)
+    reglas_actuales = df_reglas[df_reglas["producto_propio_id"] == producto_id]
+    incluir_actual = ", ".join(reglas_actuales.iloc[0]["palabras_incluir"]) if not reglas_actuales.empty and reglas_actuales.iloc[0]["palabras_incluir"] else ""
+    excluir_actual = ", ".join(reglas_actuales.iloc[0]["palabras_excluir"]) if not reglas_actuales.empty and reglas_actuales.iloc[0]["palabras_excluir"] else ""
     incluir_edit = st.text_input("Palabras que DEBEN aparecer", value=incluir_actual)
     excluir_edit = st.text_input("Palabras que NO deben aparecer", value=excluir_actual)
-    if st.button("Guardar reglas"):
-        nueva_incluir = [p.strip().lower() for p in incluir_edit.split(",") if p.strip()]
-        nueva_excluir = [p.strip().lower() for p in excluir_edit.split(",") if p.strip()]
-        guardar_reglas(producto_id, nueva_incluir, nueva_excluir)
-        st.success("Reglas guardadas. Recargando página...")
-        st.rerun()
+    if st.button("Guardar reglas (solo en esta sesión)"):
+        st.warning("Nota: En la versión cloud, las reglas se guardan temporalmente. Para persistencia, descarga el CSV modificado y sustitúyelo en el repositorio.")
+        # Aquí se podría actualizar el DataFrame en memoria, pero no se guarda en disco. Para producción, se recomienda subir de nuevo el archivo reglas_match.csv.
+        st.info("Reglas actualizadas en memoria. Para guardarlas permanentemente, exporta el nuevo CSV y súbelo a GitHub.")
 
-with st.expander("🔍 Diagnóstico (reglas y competidores rechazados)"):
-    st.write(f"**Reglas activas:** Incluir: {palabras_incluir} | Excluir: {palabras_excluir}")
-    st.write("**Competidores ACEPTADOS (mostrados en tabla):**")
-    for prod in productos_unicos:
-        if prod != producto_original:
-            st.write(f"✅ {prod}")
-    st.write("**Competidores RECHAZADOS (primeros 20):**")
-    # Mostrar algunos que no cumplen reglas (si las hay)
-    rechazados = todos_precios[~todos_precios["nombre_original"].isin(productos_unicos)]
-    for _, row in rechazados.head(20).iterrows():
-        st.write(f"❌ {row['nombre_original']}")
-
-st.caption("🚀 Los gráficos evolutivos y KPIs se basan en la estadística seleccionada (Mediana/Promedio). La tabla tiene precios centrados, nombres en formato título y resalta el producto propio. Las reglas se guardan solo durante la sesión (al recargar se pierden).")
+st.caption("🚀 Dashboard funcionando con datos desde CSVs. Las reglas se leen desde reglas_match.csv. Para cambios permanentes, actualiza ese archivo en el repositorio.")
